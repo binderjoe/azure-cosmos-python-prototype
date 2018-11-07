@@ -3,16 +3,18 @@ from typing import TYPE_CHECKING, cast
 if TYPE_CHECKING:
     from typing import Any, Iterable, Optional, Dict, Union, Tuple
 
-
 from azure.cosmos.cosmos_client import CosmosClient as _CosmosClient
 from azure.cosmos.errors import HTTPFailure
 
 
 class UsersManagementMixin:
-    def create_user(self, user):
+    def create_user(self, user):  # TODO: upsert + create or create(fail_if_exists)?
         pass
 
-    def get_user(self, id):
+    def upsert_user(self, user):
+        pass
+
+    def get_user(self, resource_id):
         pass
 
     def list_users(self):
@@ -26,7 +28,7 @@ class StoredProceduresMixin:
     def list_stored_procedures(self, query):
         pass
 
-    def get_stored_procedure(self, id):
+    def get_stored_procedure(self, resource_id):
         pass
 
     def create_stored_procedure(self):
@@ -43,7 +45,7 @@ class TriggersMixin:
     def list_triggers(self, query):
         pass
 
-    def get_trigger(self, id):
+    def get_trigger(self, resource_id):
         pass
 
     def create_trigger(self):
@@ -60,7 +62,7 @@ class UserDefinedFunctionsMixin:
     def list_user_defined_functions(self, query):
         pass
 
-    def get_user_defined_function(self, id):
+    def get_user_defined_function(self, resource_id):
         pass
 
     def create_user_defined_function(self):
@@ -80,13 +82,13 @@ class ContainersManagementMixin:
                   in the object model. 
     """
 
-    def create_container(self, id, options=None, **kwargs) -> "Container":
+    def create_container(self, resource_id, options=None, **kwargs) -> "Container":
         """
-        :param str id: Id of container to create
+        :param str resource_id: Id of container to create
         Keyword arguments:
         partitionKey, indexingPolicy, defaultTtl, conflictResolutionPolicy
         """
-        definition = dict(id=id)
+        definition = dict(id=resource_id)
         definition.update(kwargs)
         database = cast("Database", self)
         data = database._context.CreateContainer(
@@ -102,11 +104,11 @@ class ContainersManagementMixin:
             container = container_or_id
         database._context.DeleteContainer(container.collection_link)
 
-    def get_container(self, id):
+    def get_container(self, resource_id):
         containers = self.list_containers(
             query=dict(
                 query="SELECT * FROM root r WHERE r.id = @container",
-                parameters=[{"name": "@container", "value": id}],
+                parameters=[{"name": "@container", "value": resource_id}],
             )
         )
         try:
@@ -141,30 +143,30 @@ class Client:
     def __init__(self, url, key):
         self._context = _CosmosClient(url, dict(masterKey=key))
 
-    def create_database(self, id: "str", fail_if_exists=False) -> "Database":
+    def create_database(self, resource_id: "str", fail_if_exists=False) -> "Database":
         """
         Create a new database
-        :param str id: Id of the database to crate.
-        :param bool fail_if_exists: If set to True and a database with the given `id` 
+        :param str resource_id: Id of the database to crate.
+        :param bool fail_if_exists: If set to True and a database with the given `resource_id` 
         already exists, fail raise a `HTTPFailure`/status code 409. If a database with
         the given id exists, and `fail_if_exists` is False, return the existing database.
         """
         try:
-            result = self._context.CreateDatabase(database=dict(id=id))
-            return Database(self, id=result["id"])
+            result = self._context.CreateDatabase(database=dict(id=resource_id))
+            return Database(self, resource_id=result["id"])
         except HTTPFailure as e:
             if fail_if_exists and e.status_code == 409:
                 raise
-        return self.get_database(id)
+        return self.get_database(resource_id)
 
-    def get_database(self, id: "str", metadata_handler=None) -> "Database":
+    def get_database(self, resource_id: "str", metadata_handler=None) -> "Database":
         """
-        Return the existing database with the id `id. 
-        :param str id: Id of the new database.
+        Return the existing database with the id `resource_id. 
+        :param str resource_id: Id of the new database.
         :param callable metadata_handler: Optional method that will, if provided, receive an instance
         of `CosmosCallMetadata` representing metadata about the operation (RSU cost etc.)
         """
-        database = Database(client=self, id=id)
+        database = Database(client=self, resource_id=resource_id)
         if metadata_handler is not None:
             self._context.ReadDatabase(database.database_link)
             # TODO: Parse last response headers into strongly typed object
@@ -187,13 +189,13 @@ class Client:
                 for database in self._context.ReadDatabases()
             ]
 
-    def delete_database(self, id: "str"):
+    def delete_database(self, resource_id: "str"):
         """
         Delete the database with the given id. Raises a HTTPError if 
         the delete fails. 
-        :param str id: The database to delete. 
+        :param str resource_id: The database to delete. 
         """
-        self._context.DeleteDatabase(database_link="dbs/" + id)
+        self._context.DeleteDatabase(database_link="dbs/" + resource_id)
 
 
 class Database(ContainersManagementMixin, UsersManagementMixin):
@@ -201,15 +203,15 @@ class Database(ContainersManagementMixin, UsersManagementMixin):
     Azure Cosmos DB SQL Database
     """
 
-    def __init__(self, client: "Client", id: "str"):
+    def __init__(self, client: "Client", resource_id: "str"):
         """
         :param Client client: Client from which this database was retreived. TODO: should we hide the client? Should it just be context?
-        :param str id: Id of the database
+        :param str resource_id: Id of the database
         """
         self.client = client
         self._context = client._context
-        self.id = id
-        self.database_link = f"/dbs/{self.id}"
+        self.resource_id = resource_id
+        self.database_link = f"/dbs/{self.resource_id}"
 
 
 class Item(dict):
@@ -223,17 +225,17 @@ class Item(dict):
 
 
 class Container(UserDefinedFunctionsMixin, TriggersMixin, StoredProceduresMixin):
-    def __init__(self, database: "Database", id: "str"):
+    def __init__(self, database: "Database", resource_id: "str"):
         self.database = database
         self._context = database._context
         self.session_token = None
-        self.id = id
-        self.collection_link = f"{database.database_link}/colls/{self.id}"
+        self.resource_id = resource_id
+        self.collection_link = f"{database.database_link}/colls/{self.resource_id}"
 
     def set_properties(
         self,
         *,
-        id=None,
+        resource_id=None,
         partition_key=None,
         indexing_policy=None,
         default_ttl=None,
@@ -246,14 +248,14 @@ class Container(UserDefinedFunctionsMixin, TriggersMixin, StoredProceduresMixin)
         parameters = {
             key: value
             for key, value in {
-                "id": id or self.id,
+                "id": resource_id or self.resource_id,
                 "partitionKey": partition_key,
                 "indexingPolicy": indexing_policy,
                 "defaultTtl": int(default_ttl),
                 "conflictResolutionPolicy": conflict_resolution_policy,
             }.items()
-            if value
-            != None  # TODO: Questionable use - should use kwargs instead. Need to figure out best documentation for kwargs...
+            # TODO: Questionable use - should use kwargs instead. Need to figure out best documentation for kwargs...
+            if value is not None
         }
         self._context.ReplaceContainer(self.collection_link, collection=parameters)
 
@@ -269,15 +271,15 @@ class Container(UserDefinedFunctionsMixin, TriggersMixin, StoredProceduresMixin)
             return item_or_link
         return cast("str", cast("Item", item_or_link)["_self"])
 
-    def get_item(self, id: "str", metadata_handler=None, cls=Item) -> "Item":
+    def get_item(self, resource_id: "str", metadata_handler=None, cls=Item) -> "Item":
         """
-        Get the item identified by `id`
-        :param str id: Id of item to retreive
+        Get the item resource_identified by `resource_id`
+        :param str resource_id: Id of item to retreive
         :param callable metadata_handler: Optional method that will, if provided, receive an instance
         of `CosmosCallMetadata` representing metadata about the operation (RSU cost etc.)
         :returns: Item if present. TODO: General guidelines is to throw rather than returning None. 
         """
-        doc_link = f"{self.collection_link}/docs/{id}"
+        doc_link = f"{self.collection_link}/docs/{resource_id}"
         result = self._context.ReadItem(document_link=doc_link)
         headers = self._context.last_response_headers
         if metadata_handler:  # TODO: Create strongly typed object for options
@@ -318,4 +320,3 @@ class Container(UserDefinedFunctionsMixin, TriggersMixin, StoredProceduresMixin)
     def delete_item(self, item: "Item"):
         document_link = Container._document_link(item)
         self._context.DeleteItem(document_link=document_link)
-
